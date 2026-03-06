@@ -1,106 +1,157 @@
+"""
+gesture_webcam.py - Real-time hand gesture recognition
+
+Requirements:
+    pip install torch torchvision mediapipe opencv-python
+
+Usage:
+    python gesture_webcam.py
+"""
+
 import cv2
-import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 import mediapipe as mp
-from torchvision import transforms
-from torchvision.models import resnet18
-from collections import deque, Counter
+import numpy as np
+from torchvision import transforms, models
+from pathlib import Path
 
-MODEL_PATH = "gesture_resnet18.pt"
-CAMERA_INDEX = 0
-SMOOTHING_WINDOW = 8
+SCRIPT_DIR = Path(__file__).parent
+MODEL_PATH = SCRIPT_DIR / "hgr_fnaf_v2.pth"
+CONFIDENCE_THRESHOLD = 0.55
+CROP_PADDING = 0.25
+IMG_SIZE = 224
 
-CONF_THRESHOLD = 0.80     
-UNKNOWN_LABEL = "Unknown"
-
-# ---- load model ----
-ckpt = torch.load(MODEL_PATH, map_location="cpu")
-CLASSES = ckpt["classes"]
-IMG_SIZE = ckpt["img_size"]
-
-model = resnet18(weights=None)
-model.fc = nn.Linear(model.fc.in_features, len(CLASSES))
-model.load_state_dict(ckpt["state_dict"])
-model.eval()
-
-# ---- transforms ----
-tfm = transforms.Compose([
+preprocess = transforms.Compose([
+    transforms.ToPILImage(),
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225]),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
 
-# ---- MediaPipe ----
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
 
-def crop_from_landmarks(frame, hand_landmarks, pad=40):
-    h, w, _ = frame.shape
-    xs = [int(lm.x * w) for lm in hand_landmarks.landmark]
-    ys = [int(lm.y * h) for lm in hand_landmarks.landmark]
-    x1, x2 = max(min(xs) - pad, 0), min(max(xs) + pad, w)
-    y1, y2 = max(min(ys) - pad, 0), min(max(ys) + pad, h)
-    return frame[y1:y2, x1:x2], (x1, y1, x2, y2)
+def load_model(path, device):
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    classes = ckpt["classes"]
+    idx_to_class = {i: c for i, c in enumerate(classes)}
 
-pred_hist = deque(maxlen=SMOOTHING_WINDOW)
+    model = models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, len(classes))
+    model.load_state_dict(ckpt["state_dict"])
+    model.to(device)
+    model.eval()
+    return model, idx_to_class
 
-cap = cv2.VideoCapture(CAMERA_INDEX)
 
-while True:
-    ok, frame = cap.read()
-    if not ok:
-        break
+def get_hand_bbox(hand_landmarks, frame_w, frame_h, padding=CROP_PADDING):
+    xs = [lm.x for lm in hand_landmarks.landmark]
+    ys = [lm.y for lm in hand_landmarks.landmark]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
 
-    frame = cv2.flip(frame, 1)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    res = hands.process(rgb)
+    w = x_max - x_min
+    h = y_max - y_min
+    x_min = max(0, x_min - w * padding)
+    y_min = max(0, y_min - h * padding)
+    x_max = min(1, x_max + w * padding)
+    y_max = min(1, y_max + h * padding)
 
-    label_text = "No hand"
-    conf_text = ""
+    return (int(x_min * frame_w), int(y_min * frame_h),
+            int(x_max * frame_w), int(y_max * frame_h))
 
-    if res.multi_hand_landmarks:
-        hlm = res.multi_hand_landmarks[0]
-        crop, (x1, y1, x2, y2) = crop_from_landmarks(frame, hlm, pad=50)
+def get_finger_direction(hand_landmarks):
+    """Determine if fingers point up, down, left, or right."""
+    wrist = hand_landmarks.landmark[0]
+    middle_tip = hand_landmarks.landmark[12]
 
-        if crop.size > 0:
-            pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            x = tfm(pil).unsqueeze(0)
+    dx = middle_tip.x - wrist.x
+    dy = middle_tip.y - wrist.y  # y increases downward
 
-            with torch.no_grad():
-                logits = model(x)
-                probs = torch.softmax(logits, dim=1)[0]
-                idx = int(torch.argmax(probs))
-                conf = float(probs[idx])
+    # If vertical movement dominates -> up/down
+    # If horizontal movement dominates -> left/right
+    if abs(dy) > abs(dx):
+        return "up" if dy < 0 else "down"
+    else:
+        return "right" if dx > 0 else "left"
 
-            # confidence gate
-            if conf >= CONF_THRESHOLD:
-                pred_hist.append(idx)
-                smooth_idx = Counter(pred_hist).most_common(1)[0][0]
-                label_text = CLASSES[smooth_idx]
-            else:
-                label_text = UNKNOWN_LABEL
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
 
-            conf_text = f"{conf:.2f}"
+    model, idx_to_class = load_model(MODEL_PATH, device)
+    print(f"Classes: {list(idx_to_class.values())}")
 
-            cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+    mp_hands = mp.solutions.hands
+    #mp_draw = mp.solutions.drawing_utils
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=2,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.5,
+    )
 
-    cv2.putText(frame, label_text, (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255,255,255), 2)
-    if conf_text:
-        cv2.putText(frame, f"conf: {conf_text}", (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    print("Press 'q' to quit.")
 
-    cv2.imshow("Gesture Demo", frame)
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-cap.release()
-cv2.destroyAllWindows()
+        frame = cv2.flip(frame, 1)
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb)
+
+        if results.multi_hand_landmarks:
+            for hand_lm in results.multi_hand_landmarks:
+                #mp_draw.draw_landmarks(frame, hand_lm, mp_hands.HAND_CONNECTIONS)
+
+                x1, y1, x2, y2 = get_hand_bbox(hand_lm, w, h)
+                if x2 - x1 < 10 or y2 - y1 < 10:
+                    continue
+
+                crop_rgb = rgb[y1:y2, x1:x2]
+                if crop_rgb.size == 0:
+                    continue
+
+                inp = preprocess(crop_rgb).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    probs = torch.softmax(model(inp), dim=1)
+                    conf, pred = probs.max(1)
+                    conf = conf.item()
+                    pred = pred.item()
+
+                if conf >= CONFIDENCE_THRESHOLD:
+                    gesture_name = idx_to_class[pred]
+
+                    if gesture_name == "two_sideways":
+                        direction = get_finger_direction(hand_lm)
+                        if direction in ("left", "right"):
+                            gesture_name = f"two_sideways_{direction}"
+
+                    label = f"{gesture_name} ({conf:.0%})"
+                    color = (0, 255, 0)
+                else:
+                    label = f"? ({conf:.0%})"
+                    color = (128, 128, 128)
+
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw, y1), color, -1)
+                cv2.putText(frame, label, (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+
+        cv2.imshow("Hand Gesture Recognition", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    hands.close()
+
+
+if __name__ == "__main__":
+    main()
