@@ -17,7 +17,7 @@ from torchvision import transforms, models
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
-MODEL_PATH = SCRIPT_DIR / "hgr_fnaf_v2.pth"
+MODEL_PATH = SCRIPT_DIR / "fnaf_hgr_final.pth"
 CONFIDENCE_THRESHOLD = 0.55
 CROP_PADDING = 0.25
 IMG_SIZE = 224
@@ -93,6 +93,7 @@ def main():
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
     print("Press 'q' to quit.")
 
     while True:
@@ -124,6 +125,14 @@ def main():
                     conf = conf.item()
                     pred = pred.item()
 
+                # Resolve handedness
+                hand_label = "?"
+                if results.multi_handedness:
+                    hand_idx = list(results.multi_hand_landmarks).index(hand_lm)
+                    handedness = results.multi_handedness[hand_idx].classification[0].label
+                    # Flip because frame is mirrored
+                    hand_label = "Left" if handedness == "Left" else "Right"
+
                 if conf >= CONFIDENCE_THRESHOLD:
                     gesture_name = idx_to_class[pred]
 
@@ -143,6 +152,10 @@ def main():
                 cv2.rectangle(frame, (x1, y1 - th - 10), (x1 + tw, y1), color, -1)
                 cv2.putText(frame, label, (x1, y1 - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+
+                # Show handedness below the bounding box
+                cv2.putText(frame, f"{hand_label} hand", (x1, y2 + 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 200, 0), 2)
 
         cv2.imshow("Hand Gesture Recognition", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):

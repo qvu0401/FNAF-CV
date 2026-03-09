@@ -5,36 +5,32 @@ ACM AI Project Winter '26
 
 https://github.com/user-attachments/assets/76abd7fb-8fa1-4911-a3e6-510ae64169b9
 
-Ran in venv with python 3.12 (python 3.13+ doesnt have pytorch support), numpy==1.26.4, opencv-python==4.10.0.84
+Trained with downscaled HaGRID dataset: https://huggingface.co/datasets/cj-mills/hagrid-sample-500k-384p
 
-trained with downscaled hagrid dataset https://huggingface.co/datasets/cj-mills/hagrid-sample-500k-384p
+Uses ResNet18 fine-tuned for gesture classification. Hand detection and localization is handled by MediaPipe — the model only classifies the cropped hand region.
 
-Uses resnet18 as pre-trained full frame classifier (NOTE this model only does gesture classification not detection)
+Classes: `palm`, `mute`, `ok`, `two_up`, `two_up_inverted`. Last 2 was augmented by rotating 0, 90, 180, 270 degrees and relabelling as `two_up`, `two_right`, `two_left`, `two_down`. Shows as unknown if confidence < 55%.
 
-classes used: palm, stop, stop_inverted, fist; shows as unknown if confidence < 0.8
+## Setup
 
-to run demo in virtual environment:
+Requires Python 3.12 (PyTorch does not support 3.13+).
 
+```bash
 python3.12 -m venv venv
-
 source venv/bin/activate
-
 pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-pip install numpy==1.26.4
+## Run
 
-pip install torch torchvision torchaudio
-
-pip install opencv-python==4.10.0.84
-
-pip install mediapipe pillow
-
+```bash
 python webcam_gesture_demo.py
+```
 
-Limitations:
+Press `q` to quit.
 
-Can't detect gestures with high confidence when hand is rotated from upright position. To fix, we could augment the dataset first (rotated 90, 180, mirrored, etc...)
+## Limitations
 
-Model also tries to detect a hand not doing any gesture as one of the gesture. To fix, we could add the no_gesture class to the dataset, which might help? It contains natural hand postures. 
-
-Model right now (resnet18) only does the gesture recognition, not detection (detecting where the hand is + recognizing gesture). The python program detects the hand for the model using MediaPipe, crop it, then use the model for recognition. Maybe it'd be more accurate if the model does both with YOLO? I'm not sure, but it'd be more to train.
+- No `no_gesture` class, so the model always tries to classify a visible hand as one of the gestures. Fix: add the `no_gesture` class from HaGRID.
+- Model does classification only, not detection. MediaPipe handles localization as a pre-step. A unified detection+classification model (e.g. YOLO) might improve accuracy.
